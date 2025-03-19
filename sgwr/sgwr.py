@@ -50,6 +50,7 @@ class ALPHA_OPT(GLM):
         self.bt_value = bt_value
         self.iter = n_n
         self.comm = comm
+        self.aiccs = []
 
         self.k = self.X.shape[1]
 
@@ -220,8 +221,7 @@ class ALPHA_OPT(GLM):
         return influ_lis, resdi_lis, predy_lis, params, w_lis, S, tr_sts, CCT_lis
 
 
-    def fit_func(self, ini_params=None, tol=1.0e-5, max_iter=20, solve='iwls',
-                 lite=False, pool=None):
+    def fit_func(self, ini_params=None, tol=1.0e-5, max_iter=20, solve='iwls', lite=False, pool=None):
         self.fit_params['ini_params'] = ini_params
         self.fit_params['tol'] = tol
         self.fit_params['max_iter'] = max_iter
@@ -233,12 +233,11 @@ class ALPHA_OPT(GLM):
         if lite:
             return SGWRResultsLite(self, resdi_lis, influ_lis, params)
         else:
-            return SGWRResults(self, params, predy_lis, S, CCT_lis, influ_lis, tr_sts, w_lis)
+            return SGWRResults(self, params, predy_lis, S, CCT_lis, influ_lis, tr_sts, w_lis, self.aiccs)
 
 
 class SGWRResults(GLMResults):
-    def __init__(self, model, params, predy, S, CCT, influ, tr_STS=None,
-                 w=None):
+    def __init__(self, model, params, predy, S, CCT, influ, tr_STS=None, w=None, aiccs=None):
         GLMResults.__init__(self, model, params, predy, w)
         self.offset = model.offset
         if w is not None:
@@ -249,6 +248,7 @@ class SGWRResults(GLMResults):
         self.influ = influ
         self.CCT = self.cov_params(CCT, model.exog_scale)
         self._cache = {}
+        self.aiccs = aiccs  
 
     @cache_readonly
     def W(self):
@@ -726,6 +726,7 @@ class SGWR:
         self.minbw = None
         self.maxbw = None
         self.bw = None
+        self.aiccs = []
 
         self.parse_sgwr_args()
 
@@ -997,7 +998,6 @@ class SGWR:
         header = data[0, 3:]
 
         g_x = data[1:, 3:]
-
         g_y = data[1:, 2].reshape(-1, 1)
 
         scaler = StandardScaler()
@@ -1015,16 +1015,19 @@ class SGWR:
         data = data[1:, 3:]
         data = pd.DataFrame(data, columns=columns)
         models = []
-        aiccs = []
-        bt_value = 0.5
-        alph_determine = ALPHA_OPT(g_coords, g_y, g_x, self.opt_bw, data, columns, self.comm, self.iter, bt_value,
-                                   kernel='gaussian')
-        result = alph_determine.fit_func()
-        aiccV = result.aicc
-        aiccs.append(aiccV)
-        models.append(result)
+        alphas = [0, 0.02, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]  # List of alpha values
+        self.aiccs = []
 
-        ind_bt = aiccs.index(min(aiccs))
+        for alpha in alphas:
+            bt_value = alpha
+            alph_determine = ALPHA_OPT(g_coords, g_y, g_x, self.opt_bw, data, columns, self.comm, self.iter, bt_value,
+                                    kernel='gaussian')
+            result = alph_determine.fit_func()
+            aiccV = result.aicc
+            self.aiccs.append((alpha, aiccV))  # Store alpha and AICc
+            models.append(result)
+
+        ind_bt = self.aiccs.index(min(self.aiccs, key=lambda x: x[1]))
 
         if self.comm.rank == 0:
             selected_model = models[ind_bt]
@@ -1053,6 +1056,11 @@ class SGWR:
             ### For saving the summary table and coef
             self.save_results(header, selected_model, g_y)
 
+            # Print all alpha values and their corresponding AICc scores
+            for alpha, aicc in self.aiccs:
+                print(f"Alpha: {alpha}, AICc: {aicc}")
+
+        return self.aiccs
     def compute_aicc(self, RSS, trS):
         """
         Compute AICc
